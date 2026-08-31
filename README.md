@@ -28,6 +28,8 @@ The UI is bilingual (Polish by default, English via the toggle in the top-right 
 ├── sitemap.xml
 ├── tools/
 │   └── build-agent-files.mjs   # Regenerates llms.txt + the static summary
+├── deploy/
+│   └── worker.mjs      # Cloudflare Worker: the plain-text answer for curl
 ├── DEPLOYMENT.md       # Server setup and the deploy workflow
 ├── .github/workflows/
 │   └── deploy.yml      # Verify + rsync to the server on every push to main
@@ -143,6 +145,25 @@ comparison list. Three things fix that:
 
 `index.html` also embeds schema.org JSON-LD describing the site and pointing at the JSON, and
 `robots.txt` explicitly allows the major search and AI user agents.
+
+### From a terminal, the answer is just the answer
+
+```sh
+$ curl czyacerixxznalazlprace.pl
+Nie.
+```
+
+A Cloudflare Worker ([`deploy/worker.mjs`](deploy/worker.mjs)) answers the root path in
+`text/plain` when the request comes from a hand-run terminal client — `curl`, `Wget`, `HTTPie`,
+`xh`, `lwp-request` — and does not ask for HTML. `Accept-Language: en` gets `No.` instead.
+
+Everything else is deliberately untouched. Anything sending `Accept: text/html` gets the page, so
+`curl -H 'Accept: text/html' czyacerixxznalazlprace.pl` still returns the full markup; every path
+other than `/` is unaffected; and the user-agent list is a narrow whitelist that excludes
+`python-requests`, `Go-http-client` and the like, because those are how AI assistants and
+scrapers fetch the page and they should keep receiving the static summary rather than four bytes.
+
+The Worker is not part of the rsync deploy — see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 All of the generated pieces come from one command:
 

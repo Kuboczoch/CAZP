@@ -9,7 +9,8 @@ Plain HTML, CSS, and vanilla JavaScript. **No build step, no package manager, no
 Bootstrap 5.3 and Google Fonts come from a CDN at runtime. The repo deploys exactly as it sits.
 
 The one script, `tools/build-agent-files.mjs`, is a hand-run maintenance task (plain Node, no
-deps) — not a build step. Deployment never invokes it.
+deps) — not a build step. Deployment never invokes it. `deploy/worker.mjs` is a Cloudflare
+Worker that runs at the edge, not in the site — it is neither bundled nor deployed by rsync.
 
 Do not introduce a bundler, a framework, TypeScript, or a `package.json` unless explicitly
 asked. Keeping this a drop-on-a-server static site is the point.
@@ -83,13 +84,16 @@ production server. Consequences worth remembering:
 - **The exclude list in the workflow decides what is public.** Anything added to the repo is
   served unless excluded there — check it before committing something that should not be on the
   web root.
+- **The Cloudflare Worker is deployed separately, by hand.** Pushing to `main` does not update
+  it. The smoke test asserts its live behaviour when the `CURL_ANSWER` variable is `true`, so a
+  drifted or deleted Worker fails the next deploy rather than going unnoticed.
 
 Full setup notes live in `DEPLOYMENT.md`.
 
 ## Conventions
 
-- **4-space indentation everywhere, no tabs, no trailing whitespace.** All seven source files
-  are currently clean — keep them that way. One apparent exception: the continuation lines in
+- **4-space indentation everywhere, no tabs, no trailing whitespace.** All source files are
+  currently clean — keep them that way. One apparent exception: the continuation lines in
   the `#global-medals` template literal near the end of `updateCounter()` are indented to align
   as *string content*, not code. Leave them alone.
 - **UI copy and code comments are in Polish.** Match the surrounding language when editing; do
@@ -134,6 +138,18 @@ Full setup notes live in `DEPLOYMENT.md`.
   try to "fix" them by adding one.
 - **Language choice is not persisted.** There is no `localStorage`; a reload returns to Polish.
   That is the current behavior, not a bug to fix silently.
+- **`curl` does not get the HTML at all.** `deploy/worker.mjs` runs at the Cloudflare edge and
+  answers `/` with the four bytes `Nie.` for terminal user agents (`curl`, `Wget`, `HTTPie`, `xh`,
+  `lwp-request`) that do not send `Accept: text/html`. Consequences: editing `deploy/worker.mjs`
+  and pushing changes nothing until the Worker is redeployed in the Cloudflare dashboard; when
+  checking a change with `curl` (see "Running and verifying"), that is your local server, not the
+  live site, so it is unaffected — but `curl` against production needs
+  `-H 'Accept: text/html'` to see the page. The user-agent list is a whitelist and must stay
+  narrow: adding `python-requests` or `Go-http-client` to it would take the static summary away
+  from the AI assistants the summary exists for. The Worker also owns the `http → https` redirect —
+  it runs before Cloudflare's "Always Use HTTPS", which stays on as a backstop. Its plain-text
+  reply deliberately carries no HSTS header, so check that header with `-H 'Accept: text/html'`
+  or you will be reading the Worker's response and conclude HSTS is gone.
 - **`dlc/` is deliberately self-contained**, with its own `css/` and `js/`. Its stylesheet
   repeats some custom properties from the main one. Do not merge the two stylesheets or hoist
   shared assets — the pages are independent.

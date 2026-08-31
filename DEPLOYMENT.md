@@ -17,7 +17,8 @@ to before the server exists.
 ## What gets deployed
 
 Everything except the repo's own scaffolding. `README.md`, `CLAUDE.md`, `DEPLOYMENT.md`,
-`tools/`, `.github/` and `.git/` are excluded, leaving exactly the ten files the site serves:
+`tools/`, `deploy/`, `.github/` and `.git/` are excluded, leaving exactly the ten files the site
+serves:
 
 ```
 index.html  css/styles.css  js/main.js  data/events.json
@@ -206,6 +207,101 @@ Two things this site needs that are easy to get wrong:
 
 ---
 
+## The terminal answer (Cloudflare Worker)
+
+```sh
+$ curl czyacerixxznalazlprace.pl
+Nie.
+```
+
+That answer does not come from nginx. The site is proxied by Cloudflare, and a small Worker
+answers the root path for terminal HTTP clients before the request ever reaches the origin.
+Everything else — browsers, search crawlers, AI agents, every path other than `/` — falls
+through to the origin untouched and still gets the full HTML with its static summary.
+
+The script is [`deploy/worker.mjs`](deploy/worker.mjs). It is **not** copied by the rsync deploy
+(`deploy/` is in the exclude list); the repo holds the canonical copy and the edge holds a paste
+of it. It decides, in this order:
+
+1. **`Accept` contains `text/html` → the page.** Browsers are excluded before any User-Agent
+   sniffing happens. This is also the escape hatch when debugging:
+   `curl -H 'Accept: text/html' czyacerixxznalazlprace.pl` returns the real HTML.
+2. **A terminal User-Agent (`curl`, `Wget`, `HTTPie`, `xh`, `lwp-request`) asking for `/` with
+   `GET` or `HEAD` → `Nie.`** in `text/plain`, or `No.` if the request carries
+   `Accept-Language: en`. Nothing else matches: `/data/events.json`, `/llms.txt` and `/dlc/`
+   behave exactly as before for every client.
+3. **Anything else → the origin.** The user-agent list is a whitelist and deliberately narrow —
+   `python-requests`, `Go-http-client`, `node-fetch` and friends are how bots and AI assistants
+   fetch the page, and they are supposed to receive the static summary, not four bytes.
+
+### Why the Worker also does the HTTPS redirect
+
+`curl example.com` does not follow redirects, so before this existed the bare command printed an
+empty body: port 80 answered with a `301` and curl showed nothing. The Worker therefore has to be
+reached on `http://` too, which is why its routes are written without a scheme.
+
+Measured on this zone, the Worker runs **before** Cloudflare's Always Use HTTPS, so that setting
+can stay on — it never gets the chance to pre-empt the terminal answer. It is a backstop, not the
+thing doing the work: the `301` a browser receives on `http://` comes from the Worker's own
+redirect (note the absent `content-type`, which Cloudflare's built-in redirect does send). The
+Worker redirects every `http://` request except the one case above, so nothing but the four-byte
+answer is ever served over plain HTTP.
+
+HSTS is untouched for the clients that can act on it. `strict-transport-security` comes from
+Cloudflare's edge certificate settings and still rides on the HTML response; it is absent only
+from the Worker's synthetic plain-text reply, which no browser ever sees — and curl ignores HSTS
+regardless. Check it the way a browser would, or you will be reading the Worker's headers and
+conclude it has vanished:
+
+```sh
+curl -sI -H 'Accept: text/html' https://czyacerixxznalazlprace.pl/ | grep -i strict-transport
+```
+
+### Deploying it
+
+By hand, in the Cloudflare dashboard — no `wrangler`, no `npm`, in keeping with the rest of the
+repo. Workers → Create → paste `deploy/worker.mjs` → Deploy, then add two routes (leave the
+scheme off, so they match both `http` and `https`):
+
+```
+czyacerixxznalazlprace.pl/*
+www.czyacerixxznalazlprace.pl/*
+```
+
+Cloudflare **Snippets** runs the same code from the dashboard if Workers routes are not available
+on the plan.
+
+Watch the route patterns: a leading `*.` matches **subdomains only**, so
+`*.czyacerixxznalazlprace.pl/*` silently skips the apex — the one address people actually type.
+Write the hostname plainly, as above.
+
+Also turn **off** the `workers.dev` routes under Domains & Routes. Otherwise the Worker is
+reachable at `<name>.<account>.workers.dev`, where a browser request makes it `fetch()` its own
+hostname — a subrequest loop.
+
+Then verify, before and after:
+
+1. `curl https://czyacerixxznalazlprace.pl/` prints `Nie.`, a browser still gets the site, and
+   `/data/events.json` is still JSON.
+2. `curl czyacerixxznalazlprace.pl` — no scheme, no `-L` — prints `Nie.`, while
+   `curl -sI -H 'Accept: text/html' czyacerixxznalazlprace.pl` is still a `301` to `https://`.
+3. Turn the checks on for future deploys: `gh variable set CURL_ANSWER --body 'true'`.
+
+**Rolling back needs no deploy.** Remove the Worker routes and everything reverts to the previous
+behaviour immediately — Always Use HTTPS resumes handling port 80. Unset `CURL_ANSWER` so the
+smoke test stops expecting the answer.
+
+### The smoke test guards it
+
+Because the Worker is deployed by hand, the repo and the edge can drift. The workflow's smoke
+test therefore asserts the *live behaviour* on every deploy — that `curl` gets `Nie.` on both
+schemes, that `Accept: text/html` still returns the page with its static summary, that browsers
+on `http://` still get a `301` to HTTPS, and that HSTS is still being sent. Those checks only run
+when the `CURL_ANSWER` repository variable is `true`, so the repo can be pushed before the Worker
+exists without turning the build red.
+
+---
+
 ## Operating it
 
 **Watch a deploy**
@@ -239,6 +335,9 @@ gh workflow run Deploy
 | Deploy succeeds but the site 403s | SELinux label missing on a non-`/var/www` root — see "Using a different directory" above |
 | `DEPLOY_PATH ... is a system directory` | You pointed it at `/srv` or `/var` rather than the site's own subdirectory |
 | `mkdir "/srv/cazp/srv/cazp" failed` (path doubled) | The key uses `rrsync` but `DEPLOY_RRSYNC` is not set to `true` — see "Optional hardening" below |
+| `curl` prints HTML instead of `Nie.` | The Worker route came off, or the request carried `Accept: text/html` |
+| `curl` prints nothing over `http://` | Cloudflare's Always Use HTTPS is back on — it pre-empts the Worker |
+| Smoke test fails only on the terminal-answer checks | The Worker is gone or stale while `CURL_ANSWER` is still `true` |
 | Verify fails on "Generated files are stale" | You edited `data/events.json` without running `node tools/build-agent-files.mjs`; run it and commit |
 | Site serves old CSS after a deploy | Browser or CDN cache — see the `Cache-Control` block above |
 

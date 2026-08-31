@@ -38,6 +38,7 @@ jobs:
           node --check js/main.js
           node --check dlc/js/main.js
           node --check tools/build-agent-files.mjs
+          node --check deploy/worker.mjs
 
       - name: events.json is valid JSON
         run: node -e "JSON.parse(require('fs').readFileSync('data/events.json', 'utf8'))"
@@ -127,6 +128,7 @@ jobs:
             --exclude='.git/' \
             --exclude='.github/' \
             --exclude='tools/' \
+            --exclude='deploy/' \
             --exclude='README.md' \
             --exclude='CLAUDE.md' \
             --exclude='DEPLOYMENT.md' \
@@ -135,14 +137,68 @@ jobs:
       - name: Smoke test
         env:
           SITE_URL: ${{ vars.SITE_URL }}
+          CURL_ANSWER: ${{ vars.CURL_ANSWER }}
         run: |
           if [ -z "$SITE_URL" ]; then
             echo "SITE_URL not set — skipping smoke test."
             exit 0
           fi
-          echo "Checking $SITE_URL ..."
+          base="${SITE_URL%/}"
+          insecure="http://${base#https://}"
+          fail=0
+          check() {   # check <label> <expected> <actual>
+            if [ "$3" = "$2" ]; then
+              printf '  %-52s ok\n' "$1"
+            else
+              printf '  %-52s FAIL\n    expected: %s\n    actual:   %s\n' "$1" "$2" "$3"
+              echo "::error::Smoke test: $1 — expected '$2', got '$3'"
+              fail=1
+            fi
+          }
+
+          echo "Checking $base ..."
           for path in "/" "/data/events.json" "/llms.txt"; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "${SITE_URL%/}$path")
-            echo "  $path -> $code"
-            [ "$code" = "200" ] || { echo "::error::$path returned $code"; exit 1; }
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$base$path")
+            check "$path returns 200" "200" "$code"
           done
+
+          # The page itself must still be HTML for anything that asks for HTML,
+          # static summary included — that is what crawlers and AI agents read.
+          page=$(curl -sS --max-time 20 -H 'Accept: text/html' "$base/")
+          case "$page" in
+            *"<title>"*) html_title=yes ;; *) html_title=no ;;
+          esac
+          case "$page" in
+            *'id="static-summary"'*) html_summary=yes ;; *) html_summary=no ;;
+          esac
+          check "/ with Accept: text/html is the page" "yes" "$html_title"
+          check "/ with Accept: text/html has the static summary" "yes" "$html_summary"
+
+          case "$(curl -sS --max-time 20 "$base/data/events.json")" in
+            *'"startDate"'*) json=yes ;; *) json=no ;;
+          esac
+          check "/data/events.json is still the data" "yes" "$json"
+
+          # The Cloudflare Worker is deployed by hand, outside this workflow, so
+          # these check the live edge rather than anything rsync just copied.
+          # Set the CURL_ANSWER variable to 'true' once the Worker is routed —
+          # see DEPLOYMENT.md, "The terminal answer".
+          if [ "$CURL_ANSWER" = "true" ]; then
+            echo "Checking the terminal answer ..."
+            check "curl $base/ prints the answer" "Nie." "$(curl -sS --max-time 20 "$base/")"
+            check "curl $insecure/ prints the answer" "Nie." "$(curl -sS --max-time 20 "$insecure/")"
+            check "curl -H 'Accept-Language: en' is English" "No." \
+              "$(curl -sS --max-time 20 -H 'Accept-Language: en' "$base/")"
+            check "browsers on http:// are still redirected" "301" \
+              "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -H 'Accept: text/html' "$insecure/")"
+            check "the redirect target is https" "$base/" \
+              "$(curl -sS -o /dev/null -w '%{redirect_url}' --max-time 20 -H 'Accept: text/html' "$insecure/")"
+            # Ask as a browser would: the Worker's plain-text reply carries no
+            # HSTS by design, and no browser ever receives that reply.
+            check "HSTS survives on https" "yes" \
+              "$(curl -sS -o /dev/null -D - --max-time 20 -H 'Accept: text/html' "$base/" | grep -qi '^strict-transport-security:' && echo yes || echo no)"
+          else
+            echo "::notice::CURL_ANSWER is not 'true' — skipping the terminal-answer checks. See DEPLOYMENT.md."
+          fi
+
+          exit $fail

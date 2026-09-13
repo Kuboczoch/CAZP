@@ -306,8 +306,6 @@ function toggleLanguage() {
 }
 
 // --- Start ---
-// Przeglądarki ograniczają timery w nieaktywnych kartach. Po powrocie uruchom
-// licznik natychmiast i ustaw kolejne odświeżenia na granicach pełnych sekund.
 let counterTimer = null;
 
 function stopCounterTimer() {

@@ -306,9 +306,29 @@ function toggleLanguage() {
 }
 
 // --- Start ---
-// Licznik rusza natychmiast; porównania dołączają, gdy JSON zostanie wczytany.
-updateCounter();
-setInterval(updateCounter, 1000);
+// Przeglądarki ograniczają timery w nieaktywnych kartach. Po powrocie uruchom
+// licznik natychmiast i ustaw kolejne odświeżenia na granicach pełnych sekund.
+let counterTimer = null;
+
+function stopCounterTimer() {
+    if (counterTimer !== null) {
+        clearTimeout(counterTimer);
+        counterTimer = null;
+    }
+}
+
+function scheduleCounterUpdate() {
+    stopCounterTimer();
+    if (document.hidden) return;
+
+    updateCounter();
+    const delay = 1000 - (Date.now() % 1000);
+    counterTimer = setTimeout(scheduleCounterUpdate, delay);
+}
+
+document.addEventListener("visibilitychange", scheduleCounterUpdate);
+window.addEventListener("pageshow", scheduleCounterUpdate);
+scheduleCounterUpdate();
 
 loadEvents()
     .then(updateCounter)

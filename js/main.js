@@ -306,27 +306,46 @@ function toggleLanguage() {
 }
 
 // --- Start ---
-let counterTimer = null;
+let counterFrame = null;
+let renderedSecond = null;
 
-function stopCounterTimer() {
-    if (counterTimer !== null) {
-        clearTimeout(counterTimer);
-        counterTimer = null;
+function stopCounterAnimation() {
+    if (counterFrame !== null) {
+        cancelAnimationFrame(counterFrame);
+        counterFrame = null;
     }
 }
 
-function scheduleCounterUpdate() {
-    stopCounterTimer();
+function renderCounterFrame() {
+    counterFrame = null;
     if (document.hidden) return;
 
-    updateCounter();
-    const delay = 1000 - (Date.now() % 1000);
-    counterTimer = setTimeout(scheduleCounterUpdate, delay);
+    const currentSecond = Math.floor(Date.now() / 1000);
+    if (currentSecond !== renderedSecond) {
+        renderedSecond = currentSecond;
+        updateCounter();
+    }
+
+    counterFrame = requestAnimationFrame(renderCounterFrame);
 }
 
-document.addEventListener("visibilitychange", scheduleCounterUpdate);
-window.addEventListener("pageshow", scheduleCounterUpdate);
-scheduleCounterUpdate();
+function startCounterAnimation() {
+    stopCounterAnimation();
+    renderedSecond = null;
+    renderCounterFrame();
+}
+
+function handleVisibilityChange() {
+    if (document.hidden) {
+        stopCounterAnimation();
+    } else {
+        startCounterAnimation();
+    }
+}
+
+document.addEventListener("visibilitychange", handleVisibilityChange);
+window.addEventListener("pageshow", startCounterAnimation);
+startCounterAnimation();
 
 loadEvents()
     .then(updateCounter)
